@@ -34,7 +34,7 @@
                     "parameter": {
                         "writeMode": "insert",
                         "username": "root",
-                        "password": "zys123",
+                        "password": "root",
                         "column": [
                             "load_dt",
                             "company",
@@ -52,7 +52,7 @@
                         ],
                         "connection": [
                             {
-                                "jdbcUrl": "jdbc:mysql://120.46.25.208:3306/test?useUnicode=true&characterEncoding=gbk",
+                                "jdbcUrl": "jdbc:mysql://XXXX:3306/test?useUnicode=true&characterEncoding=gbk",
                                 "table": [
                                     "dim_isc_hac_mes_org_dd"
                                 ]
