@@ -1,0 +1,66 @@
+{
+    "job": {
+        "setting": {
+            "speed": {
+                "channel": 2
+            },
+            "errorLimit": {
+                "record": 0
+            }
+        },
+        "content": [
+            {
+                "reader": {
+                    "name": "s3reader",
+                    "parameter": {
+                        "endpoint": "http://10.19.61.41:8060",
+                        "accessId": "7E1PYC4109UE02QEE3JB",
+                        "accessKey": "Z7R2tiqfU4e4mkFkRTWxNnBYzEFDgmfhK53L8lLW",
+                        "bucket": "dorisosstest-bt1",
+                        "object": [
+                            "dorisdev/data/dw_dim_isc_hac_mes_org_dd/result_*"
+                        ],
+                        "column": [
+                            "*"
+                        ],
+                        "region": "default",
+                        "fileFormat": "csv",
+                        "fieldDelimiter": ",",
+                        "nullFormat": "\\N"
+                    }
+                },
+                "writer": {
+                    "name": "mysqlwriter",
+                    "parameter": {
+                        "writeMode": "insert",
+                        "username": "root",
+                        "password": "zys123",
+                        "column": [
+                            "load_dt",
+                            "company",
+                            "factory",
+                            "department",
+                            "workshop",
+                            "line",
+                            "class_group",
+                            "org_id"
+                        ],
+                        "session": [
+                        ],
+                        "preSql": [
+                            "delete from test.dim_isc_hac_mes_org_dd"
+                        ],
+                        "connection": [
+                            {
+                                "jdbcUrl": "jdbc:mysql://120.46.25.208:3306/test?useUnicode=true&characterEncoding=gbk",
+                                "table": [
+                                    "dim_isc_hac_mes_org_dd"
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+}

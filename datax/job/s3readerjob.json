@@ -1,0 +1,41 @@
+{
+    "job": {
+        "setting": {
+            "speed": {
+                "channel": 2
+            },
+            "errorLimit": {
+                "record": 0
+            }
+        },
+        "content": [
+            {
+                "reader": {
+                    "name": "s3reader",
+                    "parameter": {
+                        "endpoint": "http://10.19.61.41:8060",
+                        "accessId": "7E1PYC4109UE02QEE3JB",
+                        "accessKey": "Z7R2tiqfU4e4mkFkRTWxNnBYzEFDgmfhK53L8lLW",
+                        "bucket": "dorisosstest-bt1",
+                        "object": [
+                            "dorisdev/data/dw_dim_isc_hac_mes_org_dd/result_*"
+                        ],
+                        "column": [
+                            "*"
+                        ],
+                        "region": "default",
+                        "fileFormat": "csv",
+                        "fieldDelimiter": ","
+                    }
+                },
+                "writer": {
+                    "name": "streamwriter",
+                    "parameter": {
+                        "print": true,
+                        "encoding": "UTF-8"
+                    }
+                }
+            }
+        ]
+    }
+}
