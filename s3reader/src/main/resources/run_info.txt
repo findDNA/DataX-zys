@@ -1,0 +1,3 @@
+本地启动需要指定参数：
+
+--jobid -1  --mode standalone --job F:\javaproject\datax_repo\DataX-zys\datax\job\s32mysql.json
