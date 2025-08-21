@@ -67,9 +67,15 @@ public class S3ParquetHadoop {
             while ((record = reader.read()) != null) {
                 List<Object> formattedRecord = new ArrayList<Object>(fieldCount);
                 for (int j = 0; j < fieldCount; j++) {
-                    Object data = readFields(record, parquetTypes.get(j), j, parquetMetaMap, false);
+                    Object data=null;
+                    try {
+                        data = readFields(record, parquetTypes.get(j), j, parquetMetaMap, false);
+                    }catch (RuntimeException e){
+                        System.out.println("error:"+e.getMessage());
+                    }
                     formattedRecord.add(data);
                 }
+                System.out.println("record: "+formattedRecord);
             }
         } catch (IOException e) {
             throw new RuntimeException(e);
