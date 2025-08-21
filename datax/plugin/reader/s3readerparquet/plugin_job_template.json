@@ -1,0 +1,16 @@
+{
+    "name": "s3readerparquet",
+    "parameter": {
+        "endpoint": "https://s3.amazonaws.com",
+        "accessId": "xxxxxxxxxxxx",
+        "accessKey": "xxxxxxxxxxxxxxxxxxxxxxx",
+        "bucket": "test",
+        "path": "",
+        "column": [
+            "*"
+        ],
+        "region": "ap-northeast-1",
+        "fileFormat": "parquet",
+        "parquetSchema": "message m { optional int64 id; optional binary name (UTF8); optional double score; }"
+    }
+}

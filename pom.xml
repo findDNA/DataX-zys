@@ -69,7 +69,8 @@
 <!--        <module>hbase20xsqlreader</module>-->
 
 <!--        <module>ossreader</module>-->
-<!--        <module>hdfsreader</module>-->
+        <module>s3readerparquet</module>
+        <module>hdfsreader</module>
 <!--        <module>ftpreader</module>-->
 <!--        <module>txtfilereader</module>-->
         <module>streamreader</module>

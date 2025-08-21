@@ -1,0 +1,14 @@
+{
+    "name": "s3readerparquet",
+    "parameter": {
+        "endpoint": "",
+        "accessId": "",
+        "accessKey": "",
+        "bucket": "",
+        "object": [],
+        "column": [],
+        "encoding": "",
+        "fieldDelimiter": "",
+        "compress": ""
+    }
+}

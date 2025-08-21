@@ -1,0 +1,42 @@
+{
+    "job": {
+        "setting": {
+            "speed": {
+                "channel": 2
+            },
+            "errorLimit": {
+                "record": 0
+            }
+        },
+        "content": [
+            {
+                "reader": {
+                    "name": "s3reader",
+                    "parameter": {
+                        "endpoint": "http://10.19.61.42:8060",
+                        "accessId": "xdlukko1n9wbw8xb3dbf",
+                        "accessKey": "3vlsfrs0cxooh3ehq1xvy42fdddslfvesgr2xoeb",
+                        "bucket": "doris-prd-bt1",
+                        "object": [
+                            "datax/s3reader/20250814/dwd_fi_rev_policy/result_*"
+                        ],
+                        "column": [
+                            "*"
+                        ],
+                        "region": "default",
+                        "fileFormat": "csv",
+                        "fieldDelimiter": ",",
+                        "nullFormat": "\\N"
+                    }
+                },
+                "writer": {
+                    "name": "streamwriter",
+                    "parameter": {
+                        "print": true,
+                        "encoding": "UTF-8"
+                    }
+                }
+            }
+        ]
+    }
+}

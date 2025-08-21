@@ -1,0 +1,7 @@
+{
+    "name": "s3readerparquet",
+    "class": "com.alibaba.datax.plugin.reader.s3readerparquet.S3ReaderParquet",
+    "description": "",
+    "developer": "alibaba"
+}
+
