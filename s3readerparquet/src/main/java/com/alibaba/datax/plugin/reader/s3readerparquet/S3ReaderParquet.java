@@ -1,234 +1,238 @@
 package com.alibaba.datax.plugin.reader.s3readerparquet;
 
+
 import com.alibaba.datax.common.exception.DataXException;
 import com.alibaba.datax.common.plugin.RecordSender;
 import com.alibaba.datax.common.spi.Reader;
 import com.alibaba.datax.common.util.Configuration;
-import com.alibaba.datax.plugin.reader.hdfsreader.HdfsReader;
-import com.alibaba.datax.plugin.reader.ossreader.Key;
-import com.alibaba.datax.plugin.reader.ossreader.OssReaderErrorCode;
-import com.alibaba.datax.plugin.reader.ossreader.util.HdfsParquetUtil;
-import com.alibaba.datax.plugin.reader.ossreader.util.OssUtil;
+import com.alibaba.datax.plugin.reader.s3readerparquet.util.S3ParquetHadoopUtils;
+import com.alibaba.datax.plugin.unstructuredstorage.reader.Constant;
 import com.alibaba.datax.plugin.unstructuredstorage.reader.UnstructuredStorageReaderUtil;
-import com.alibaba.datax.plugin.unstructuredstorage.reader.split.StartEndPair;
-import com.aliyun.oss.OSSClient;
-import org.apache.commons.lang3.tuple.Pair;
-import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.io.Charsets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.*;
 
+import java.io.InputStream;
+import java.nio.charset.UnsupportedCharsetException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
-public class S3ReaderParquet extends Reader {
-    public static class Job extends Reader.Job {
-        private static final Logger LOG = LoggerFactory
-                .getLogger(S3ReaderParquet.Job.class);
+import static com.alibaba.datax.common.exception.CommonErrorCode.CONFIG_ERROR;
+import static com.alibaba.datax.common.exception.CommonErrorCode.RUNTIME_ERROR;
+import static com.alibaba.datax.plugin.reader.s3readerparquet.S3ErrorCode.SUCCESS_FILE_ERROR;
+import static com.alibaba.datax.plugin.unstructuredstorage.reader.UnstructuredStorageReaderErrorCode.ILLEGAL_VALUE;
+import static com.alibaba.datax.plugin.unstructuredstorage.reader.UnstructuredStorageReaderErrorCode.REQUIRED_VALUE;
+
+public class S3ReaderParquet extends Reader
+{
+    public static class Job extends Reader.Job
+    {
+        private static final Logger LOG = LoggerFactory.getLogger(Job.class);
 
         private Configuration readerOriginConfig = null;
 
-        private OSSClient ossClient = null;
-        private String endpoint;
-        private String accessId;
-        private String accessKey;
         private String bucket;
-        private boolean successOnNoObject;
-        private Boolean isBinaryFile;
-
-        private List<String> objects;
-        private List<Pair<String, Long>> objectSizePairs; /*用于任务切分的依据*/
-
-        private String fileFormat;
-
-        private HdfsReader.Job hdfsReaderJob;
-        private boolean useHdfsReaderProxy = false;
+        private S3Client client = null;
 
         @Override
-        public void init() {
+        public void init()
+        {
             LOG.debug("init() begin...");
             this.readerOriginConfig = this.getPluginJobConf();
-            this.basicValidateParameter();
-            this.fileFormat = this.readerOriginConfig.getString(com.alibaba.datax.plugin.unstructuredstorage.reader.Key.FILE_FORMAT,
-                    com.alibaba.datax.plugin.unstructuredstorage.reader.Constant.DEFAULT_FILE_FORMAT);
-            this.useHdfsReaderProxy = HdfsParquetUtil.isUseHdfsWriterProxy(this.fileFormat);
-            if (useHdfsReaderProxy) {
-                HdfsParquetUtil.adaptConfigurationFromS3(this.readerOriginConfig);
-                this.hdfsReaderJob = new HdfsReader.Job();
-                this.hdfsReaderJob.setJobPluginCollector(this.getJobPluginCollector());
-                this.hdfsReaderJob.setPeerPluginJobConf(this.getPeerPluginJobConf());
-                this.hdfsReaderJob.setPeerPluginName(this.getPeerPluginName());
-                this.hdfsReaderJob.setPluginJobConf(this.getPluginJobConf());
-                this.hdfsReaderJob.init();
-                return;
-            }
+            this.validate();
             LOG.debug("init() ok and end...");
         }
 
+        private void validate()
+        {
+            readerOriginConfig.getNecessaryValue(S3Key.REGION, REQUIRED_VALUE);
+            readerOriginConfig.getNecessaryValue(S3Key.ACCESS_ID, REQUIRED_VALUE);
+            readerOriginConfig.getNecessaryValue(S3Key.ACCESS_KEY, REQUIRED_VALUE);
+            this.bucket = readerOriginConfig.getNecessaryValue(S3Key.BUCKET, REQUIRED_VALUE);
+            readerOriginConfig.getNecessaryValue(S3Key.OBJECT, REQUIRED_VALUE);
 
-        private void basicValidateParameter() {
-            endpoint = this.readerOriginConfig.getString(Key.ENDPOINT);
-            if (StringUtils.isBlank(endpoint)) {
-                throw DataXException.asDataXException(
-                        OssReaderErrorCode.CONFIG_INVALID_EXCEPTION, "invalid endpoint");
+            String encoding = readerOriginConfig.getString(S3Key.ENCODING, Constant.DEFAULT_ENCODING);
+            try {
+                Charsets.toCharset(encoding);
+            }
+            catch (UnsupportedCharsetException uce) {
+                throw DataXException.asDataXException(ILLEGAL_VALUE,
+                        String.format("unsupported encoding : [%s]", encoding), uce);
+            }
+            catch (Exception e) {
+                throw  DataXException.asDataXException(ILLEGAL_VALUE,
+                        String.format("Runtime Error : %s", e.getMessage()), e);
             }
 
-            accessId = this.readerOriginConfig.getString(Key.ACCESSID);
-            if (StringUtils.isBlank(accessId)) {
-                throw DataXException.asDataXException(
-                        OssReaderErrorCode.CONFIG_INVALID_EXCEPTION,
-                        "invalid accessId");
+            // 检测是column 是否为 ["*"] 若是则填为空
+            List<Configuration> column = readerOriginConfig.getListConfiguration(S3Key.COLUMN);
+            if (null != column && 1 == column.size() && ("\"*\"".equals(column.get(0).toString())
+                    || "'*'".equals(column.get(0).toString()))) {
+                readerOriginConfig.set(S3Key.COLUMN, new ArrayList<String>());
             }
+            else {
+                // column: 1. index type 2.value type 3.when type is Data, maybe with format string
+                List<Configuration> columns = readerOriginConfig.getListConfiguration(S3Key.COLUMN);
 
-            accessKey = this.readerOriginConfig.getString(Key.ACCESSKEY);
-            if (StringUtils.isBlank(accessKey)) {
-                throw DataXException.asDataXException(
-                        OssReaderErrorCode.CONFIG_INVALID_EXCEPTION,
-                        "invalid accessKey");
+                if (null == columns || columns.isEmpty()) {
+                    throw DataXException.asDataXException(
+                            REQUIRED_VALUE,
+                            "The item column is required");
+                }
+
+                for (Configuration eachColumnConf : columns) {
+                    eachColumnConf.getNecessaryValue(S3Key.TYPE, REQUIRED_VALUE);
+                    Integer columnIndex = eachColumnConf.getInt(S3Key.INDEX);
+                    String columnValue = eachColumnConf.getString(S3Key.VALUE);
+
+                    if (null == columnIndex && null == columnValue) {
+                        throw DataXException.asDataXException(
+                                CONFIG_ERROR,
+                                "You configured type, also configured index or value");
+                    }
+
+                    if (null != columnIndex && null != columnValue) {
+                        throw DataXException.asDataXException(
+                                CONFIG_ERROR,
+                                "You configured both index and value");
+                    }
+                }
             }
-        }
-
-        // warn: 提前验证endpoint,accessId,accessKey,bucket,object的有效性
-        private void validate() {
-            // fxxk
-            // ossClient = new OSSClient(endpoint,accessId,accessKey);
-            ossClient = OssUtil.initOssClient(this.readerOriginConfig);
-
-
-            bucket = this.readerOriginConfig.getString(Key.BUCKET);
-            if (StringUtils.isBlank(bucket)) {
-                throw DataXException.asDataXException(
-                        OssReaderErrorCode.CONFIG_INVALID_EXCEPTION,
-                        "invalid bucket");
-            } else if (!ossClient.doesBucketExist(bucket)) {
-                throw DataXException.asDataXException(
-                        OssReaderErrorCode.CONFIG_INVALID_EXCEPTION,
-                        "invalid bucket");
-            }
-
-            String object = this.readerOriginConfig.getString(Key.OBJECT);
-            if (StringUtils.isBlank(object)) {
-                throw DataXException.asDataXException(
-                        OssReaderErrorCode.CONFIG_INVALID_EXCEPTION,
-                        "invalid object");
-            }
-
-            if (this.isBinaryFile) {
-                return;
-            }
-            UnstructuredStorageReaderUtil.validateParameter(this.readerOriginConfig);
-        }
-
-
-        @Override
-        public void prepare() {
-            if (useHdfsReaderProxy) {
-                this.hdfsReaderJob.prepare();
-                return;
-            }
+            this.client = S3Util.initS3Client(readerOriginConfig);
         }
 
         @Override
-        public void post() {
-            if (useHdfsReaderProxy) {
-                this.hdfsReaderJob.post();
-                return;
+        public void destroy()
+        {
+            if (null != this.client) {
+                this.client.close();
             }
-            LOG.debug("post()");
         }
 
         @Override
-        public void destroy() {
-            if (useHdfsReaderProxy) {
-                this.hdfsReaderJob.destroy();
-                return;
-            }
-            LOG.debug("destroy()");
-        }
-
-        @Override
-        public List<Configuration> split(int adviceNumber) {
+        public List<Configuration> split(int adviceNumber)
+        {
             LOG.debug("split() begin...");
-            if (useHdfsReaderProxy) {
-                return hdfsReaderJob.split(adviceNumber);
+            List<Configuration> readerSplitConfigs = new ArrayList<>();
+
+            // 将每个单独的 object 作为一个 slice
+            List<String> objects = parseOriginObjects(readerOriginConfig.getList(S3Key.OBJECT, String.class));
+            if (objects.isEmpty()) {
+                throw DataXException.asDataXException(
+                        RUNTIME_ERROR,
+                        String.format(
+                                "The object %s in bucket %s is not found",
+                                this.readerOriginConfig.get(S3Key.OBJECT),
+                                this.readerOriginConfig.get(S3Key.BUCKET)));
             }
-            return null;
+
+            for (String object : objects) {
+                Configuration splitConfig = this.readerOriginConfig.clone();
+                splitConfig.set(S3Key.OBJECT, object);
+                readerSplitConfigs.add(splitConfig);
+                LOG.info("S3 object to be read {}", object);
+            }
+            LOG.debug("split() ok and end...");
+            return readerSplitConfigs;
+        }
+
+        private List<String> parseOriginObjects(List<String> originObjects)
+        {
+            List<String> parsedObjects = new ArrayList<>();
+            for (String object : originObjects) {
+                if (object.indexOf('*') > -1 || object.indexOf('?') > -1) {
+                    List<String> remoteObjects = listObjectsWithPattern(object);
+                    parsedObjects.addAll(remoteObjects);
+                }
+                else {
+                    parsedObjects.add(object);
+                }
+            }
+            return parsedObjects;
+        }
+
+        private List<String> listObjectsWithPattern(String pattern)
+        {
+            boolean isSuccess=false;
+            // Extract the prefix from the pattern up to the first wildcard character
+            int firstWildcardIndex = Math.min(
+                    pattern.indexOf('*') == -1 ? pattern.length() : pattern.indexOf('*'),
+                    pattern.indexOf('?') == -1 ? pattern.length() : pattern.indexOf('?')
+            );
+            String prefix = pattern.substring(0, firstWildcardIndex);
+            // Convert the pattern to a regex
+            String regex = pattern.replace("?", ".{1}").replace("*", ".*");
+            String success_equal = prefix+"SUCCESS";
+            Pattern compiledPattern = Pattern.compile(regex);
+
+            ListObjectsV2Request listObjectsV2Request = ListObjectsV2Request.builder()
+                    .bucket(bucket)
+                    .prefix(prefix)
+                    .build();
+
+            ListObjectsV2Response listObjectsV2Response;
+            List<String> remoteObjects = new ArrayList<>();
+            do {
+                listObjectsV2Response = client.listObjectsV2(listObjectsV2Request);
+
+                for (S3Object s3Object : listObjectsV2Response.contents()) {
+                    if (compiledPattern.matcher(s3Object.key()).matches()&&!success_equal.equals(s3Object.key())) {
+                        remoteObjects.add(s3Object.key());
+                    }
+                    if(success_equal.equals(s3Object.key())){
+                        isSuccess=true;
+                    }
+                }
+
+                listObjectsV2Request = listObjectsV2Request.toBuilder()
+                        .continuationToken(listObjectsV2Response.nextContinuationToken())
+                        .build();
+            }
+            while (listObjectsV2Response.isTruncated());
+            if(!isSuccess){
+                throw DataXException.asDataXException(
+                        SUCCESS_FILE_ERROR,
+                        String.format(
+                                "The  success file  in object %s is not found",
+                                remoteObjects));
+            }
+            return remoteObjects;
         }
     }
-    public static class Task extends Reader.Task {
-        private static Logger LOG = LoggerFactory.getLogger(Reader.Task.class);
+
+    public static class Task extends Reader.Task
+    {
+        private static final Logger LOG = LoggerFactory.getLogger(Task.class);
 
         private Configuration readerSliceConfig;
-        private Boolean isBinaryFile;
-        private Integer blockSizeInByte;
-        private List<StartEndPair> allWorksForTask;
-        private boolean originSkipHeader;
-        private OSSClient ossClient;
-        private String fileFormat;
-        private HdfsReader.Task hdfsReaderTask;
-        private boolean useHdfsReaderProxy = false;
 
         @Override
-        public void init() {
-            this.readerSliceConfig = this.getPluginJobConf();
-            this.fileFormat = this.readerSliceConfig.getString(com.alibaba.datax.plugin.unstructuredstorage.reader.Key.FILE_FORMAT,
-                    com.alibaba.datax.plugin.unstructuredstorage.reader.Constant.DEFAULT_FILE_FORMAT);
-            this.useHdfsReaderProxy = HdfsParquetUtil.isUseHdfsWriterProxy(this.fileFormat);
-            if (useHdfsReaderProxy) {
-                this.hdfsReaderTask = new HdfsReader.Task();
-                this.hdfsReaderTask.setPeerPluginJobConf(this.getPeerPluginJobConf());
-                this.hdfsReaderTask.setPeerPluginName(this.getPeerPluginName());
-                this.hdfsReaderTask.setPluginJobConf(this.getPluginJobConf());
-                this.hdfsReaderTask.setReaderPluginSplitConf(this.getReaderPluginSplitConf());
-                this.hdfsReaderTask.setTaskGroupId(this.getTaskGroupId());
-                this.hdfsReaderTask.setTaskId(this.getTaskId());
-                this.hdfsReaderTask.setTaskPluginCollector(this.getTaskPluginCollector());
-                this.hdfsReaderTask.init();
-                return;
-            }
-        }
-
-        @Override
-        public void prepare() {
-            LOG.info("task prepare() begin...");
-            if (useHdfsReaderProxy) {
-                this.hdfsReaderTask.prepare();
-                return;
-            }
-        }
-
-
-        @Override
-        public void startRead(RecordSender recordSender) {
-            if (useHdfsReaderProxy) {
-                this.hdfsReaderTask.startRead(recordSender);
-                return;
-            }
-            boolean successOnNoObject = this.readerSliceConfig.getBool(Key.SUCCESS_ON_NO_Object, false);
-            if (this.allWorksForTask.isEmpty() && successOnNoObject) {
+        public void startRead(RecordSender recordSender)
+        {
+            LOG.debug("Begin to start reading");
+            String object = readerSliceConfig.getString(S3Key.OBJECT);
+            try  {
+                S3ParquetHadoopUtils.readFromStream(object, readerSliceConfig, recordSender, getTaskPluginCollector());
                 recordSender.flush();
-                return;
+            }
+            catch (Exception e) {
+                LOG.warn("S3ParquetHadoopUtils readFromStream error", object);
             }
         }
 
         @Override
-        public void post() {
-            LOG.info("task post() begin...");
-            if (useHdfsReaderProxy) {
-                this.hdfsReaderTask.post();
-                return;
-            }
+        public void init()
+        {
+            this.readerSliceConfig = this.getPluginJobConf();
         }
 
         @Override
-        public void destroy() {
-            if (useHdfsReaderProxy) {
-                this.hdfsReaderTask.destroy();
-                return;
-            }
-            try {
-                // this.ossClient.shutdown();
-            } catch (Exception e) {
-                LOG.warn("shutdown ossclient meet a exception:" + e.getMessage(), e);
-            }
+        public void destroy()
+        {
+
         }
     }
 }

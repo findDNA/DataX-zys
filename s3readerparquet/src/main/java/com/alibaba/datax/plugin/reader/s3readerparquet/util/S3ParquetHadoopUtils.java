@@ -1,10 +1,13 @@
 package com.alibaba.datax.plugin.reader.s3readerparquet.util;
 
+import com.alibaba.datax.common.element.*;
 import com.alibaba.datax.common.exception.DataXException;
-import com.alibaba.datax.plugin.reader.hdfsreader.DFSUtil;
-import com.alibaba.datax.plugin.reader.hdfsreader.HdfsReaderErrorCode;
-import com.alibaba.datax.plugin.reader.hdfsreader.ParquetMessageHelper;
-import com.alibaba.datax.plugin.reader.hdfsreader.ParquetMeta;
+import com.alibaba.datax.common.plugin.RecordSender;
+import com.alibaba.datax.common.plugin.TaskPluginCollector;
+import com.alibaba.datax.plugin.reader.s3readerparquet.HdfsReaderErrorCode;
+import com.alibaba.datax.plugin.reader.s3readerparquet.ParquetMessageHelper;
+import com.alibaba.datax.plugin.reader.s3readerparquet.ParquetMeta;
+import com.alibaba.datax.plugin.reader.s3readerparquet.S3Key;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import org.apache.commons.lang3.StringUtils;
@@ -18,7 +21,8 @@ import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.MessageTypeParser;
 import org.apache.parquet.schema.PrimitiveType;
-import org.apache.parquet.schema.Type;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -32,8 +36,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-public class S3ParquetHadoop {
-
+public class S3ParquetHadoopUtils {
+    private static final Logger LOG = LoggerFactory.getLogger(S3ParquetHadoopUtils.class);
     public static  void main(String[] args) {
         Configuration conf = new Configuration();
         conf.set("fs.s3a.access.key",  "7E1PYC4109UE02QEE3JB");
@@ -44,7 +48,7 @@ public class S3ParquetHadoop {
         String schemaString = getParquetSchema(path.toString(), conf);
         System.out.println("schema:"+schemaString);
         MessageType parquetSchema = null;
-        List<Type> parquetTypes = null;
+        List<org.apache.parquet.schema.Type> parquetTypes = null;
         Map<String, ParquetMeta> parquetMetaMap = null;
         int fieldCount = 0;
         try {
@@ -64,6 +68,7 @@ public class S3ParquetHadoop {
                              .build()) {
 
             Group record;
+            int row=0;
             while ((record = reader.read()) != null) {
                 List<Object> formattedRecord = new ArrayList<Object>(fieldCount);
                 for (int j = 0; j < fieldCount; j++) {
@@ -76,12 +81,108 @@ public class S3ParquetHadoop {
                     formattedRecord.add(data);
                 }
                 System.out.println("record: "+formattedRecord);
+                row++;
             }
+            System.out.println("total row:"+row);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
 
     }
+
+    private enum Type {
+        STRING, LONG, BOOLEAN, DOUBLE, DATE,
+    }
+    private static Record transportOneRecord( List<Object> recordFields
+            , RecordSender recordSender, TaskPluginCollector taskPluginCollector, boolean isReadAllColumns) {
+        Record record = recordSender.createRecord();
+        Column columnGenerated;
+        try {
+            if (isReadAllColumns) {
+                // 读取所有列，创建都为String类型的column
+                for (Object recordField : recordFields) {
+                    String columnValue = null;
+                    if (recordField != null) {
+                        columnValue = recordField.toString();
+                    }
+                    columnGenerated = new StringColumn(columnValue);
+                    record.addColumn(columnGenerated);
+                }
+            }
+            recordSender.sendToWriter(record);
+        } catch (IllegalArgumentException iae) {
+            taskPluginCollector
+                    .collectDirtyRecord(record, iae.getMessage());
+        } catch (IndexOutOfBoundsException ioe) {
+            taskPluginCollector
+                    .collectDirtyRecord(record, ioe.getMessage());
+        } catch (Exception e) {
+            if (e instanceof DataXException) {
+                throw (DataXException) e;
+            }
+            // 每一种转换失败都是脏数据处理,包括数字格式 & 日期格式
+            taskPluginCollector.collectDirtyRecord(record, e.getMessage());
+        }
+
+        return record;
+    }
+
+    public static void readFromStream(String object, com.alibaba.datax.common.util.Configuration readerSliceConfig, RecordSender recordSende, TaskPluginCollector taskPluginCollector){
+        String bucket = readerSliceConfig.getString(S3Key.BUCKET);
+        String accessId = readerSliceConfig.getString(S3Key.ACCESS_ID);
+        String accessKey = readerSliceConfig.getString(S3Key.ACCESS_KEY);
+        String endpoint = readerSliceConfig.getString(S3Key.ENDPOINT);
+        Configuration conf = new Configuration();
+        conf.set("fs.s3a.access.key",  accessId);
+        conf.set("fs.s3a.secret.key",  accessKey);
+        // 如果使用 MinIO、Ceph 等 S3 兼容服务，则加 endpoint
+        conf.set("fs.s3a.endpoint", endpoint);
+        Path path = new Path("s3a://"+bucket+"/"+object);
+        String schemaString = getParquetSchema(path.toString(), conf);
+        LOG.info("getParquetSchema {} from object {}",schemaString,object);
+        MessageType parquetSchema = null;
+        List<org.apache.parquet.schema.Type> parquetTypes = null;
+        Map<String, ParquetMeta> parquetMetaMap = null;
+        int fieldCount = 0;
+        try {
+            parquetSchema = MessageTypeParser.parseMessageType(schemaString);
+            fieldCount = parquetSchema.getFieldCount();
+            parquetTypes = parquetSchema.getFields();
+            parquetMetaMap = ParquetMessageHelper.parseParquetTypes(parquetTypes);
+        } catch (Exception e) {
+            String message = String.format("Error parsing to MessageType via Schema string [%s]", schemaString);
+            LOG.error(message);
+            throw DataXException.asDataXException(HdfsReaderErrorCode.PARSE_MESSAGE_TYPE_FROM_SCHEMA_ERROR, e);
+        }
+
+        try (ParquetReader<Group> reader =
+                     ParquetReader.builder(new GroupReadSupport(), path)
+                             .withConf(conf)
+                             .build()) {
+            Group record;
+            int row=0;
+            while ((record = reader.read()) != null) {
+                List<Object> formattedRecord = new ArrayList<Object>(fieldCount);
+                for (int j = 0; j < fieldCount; j++) {
+                    Object data=null;
+                    try {
+                        data = readFields(record, parquetTypes.get(j), j, parquetMetaMap, false);
+                    }catch (RuntimeException e){
+                        LOG.debug("error: {}",e.getMessage());
+                    }
+                    formattedRecord.add(data);
+                }
+                LOG.debug("read row record: {}",formattedRecord);
+                transportOneRecord(formattedRecord, recordSende, taskPluginCollector, true);
+               row++;
+            }
+            LOG.debug("read row count: {}",row);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+
 
     private static String getParquetSchema(String sourceParquetFilePath, org.apache.hadoop.conf.Configuration hadoopConf) {
         GroupReadSupport readSupport = new GroupReadSupport();

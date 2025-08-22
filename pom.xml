@@ -70,7 +70,7 @@
 
 <!--        <module>ossreader</module>-->
         <module>s3readerparquet</module>
-        <module>hdfsreader</module>
+<!--        <module>hdfsreader</module>-->
 <!--        <module>ftpreader</module>-->
 <!--        <module>txtfilereader</module>-->
         <module>streamreader</module>

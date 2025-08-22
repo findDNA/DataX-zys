@@ -17,13 +17,14 @@
                         "accessId": "7E1PYC4109UE02QEE3JB",
                         "accessKey": "Z7R2tiqfU4e4mkFkRTWxNnBYzEFDgmfhK53L8lLW",
                         "bucket": "dorisosstest-bt1",
-                        "path": "/dorisdev/data/dw_dim_isc_hac_mes_org_dd_v2/1.parquet",
+                        "object": [
+                            "dorisdev/data/dmqm_im_tf_new_model_analysis/result_*"
+                        ],
                         "column": [
                             "*"
                         ],
                         "region": "default",
-                        "fileFormat": "parquet",
-                        "parquetSchema": "message m { optional int64 id; optional binary name (UTF8); optional double score; }"
+                        "fileFormat": "parquet"
                     }
                 },
                 "writer": {

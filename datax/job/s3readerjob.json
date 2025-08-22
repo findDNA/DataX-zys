@@ -31,7 +31,7 @@
                 "writer": {
                     "name": "streamwriter",
                     "parameter": {
-                        "print":  ,
+                        "print":  true,
                         "encoding": "UTF-8"
                     }
                 }

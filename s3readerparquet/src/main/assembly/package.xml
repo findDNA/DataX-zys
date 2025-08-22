@@ -18,7 +18,7 @@
         <fileSet>
             <directory>target/</directory>
             <includes>
-                <include>ossreader-0.0.1-SNAPSHOT.jar</include>
+                <include>s3readerparquet-0.0.1-SNAPSHOT.jar</include>
             </includes>
             <outputDirectory>plugin/reader/s3readerparquet</outputDirectory>
         </fileSet>
