@@ -13,12 +13,12 @@
                 "reader": {
                     "name": "s3readerparquet",
                     "parameter": {
-                        "endpoint": "http://10.19.61.41:8060",
-                        "accessId": "7E1PYC4109UE02QEE3JB",
-                        "accessKey": "Z7R2tiqfU4e4mkFkRTWxNnBYzEFDgmfhK53L8lLW",
-                        "bucket": "dorisosstest-bt1",
+                        "endpoint": "http://10.19.61.42:8060",
+                        "accessId": "xdlukko1n9wbw8xb3dbf",
+                        "accessKey": "3vlsfrs0cxooh3ehq1xvy42fdddslfvesgr2xoeb",
+                        "bucket": "doris-prd-bt1",
                         "object": [
-                            "dorisdev/data/dwd_fi_rev_msum/result_*"
+                            "datax/s3reader/20250901/dim_mk_shop_info_dd/result_*"
                         ],
                         "column": [
                             "*"
@@ -30,7 +30,7 @@
                 "writer": {
                     "name": "streamwriter",
                     "parameter": {
-                        "print":  false,
+                        "print":  true,
                         "encoding": "UTF-8"
                     }
                 }

@@ -14,9 +14,19 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.common.type.HiveDecimal;
+import org.apache.hadoop.hive.ql.exec.vector.*;
+import org.apache.orc.OrcFile;
+import org.apache.orc.TypeDescription;
+import org.apache.parquet.column.page.PageReadStore;
 import org.apache.parquet.example.data.Group;
+import org.apache.parquet.example.data.simple.convert.GroupRecordConverter;
+import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.example.GroupReadSupport;
+import org.apache.parquet.hadoop.util.HadoopInputFile;
+import org.apache.parquet.io.ColumnIOFactory;
+import org.apache.parquet.io.MessageColumnIO;
+import org.apache.parquet.io.RecordReader;
 import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.MessageTypeParser;
@@ -27,10 +37,13 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -93,6 +106,8 @@ public class S3ParquetHadoopUtils {
     private enum Type {
         STRING, LONG, BOOLEAN, DOUBLE, DATE,
     }
+    // 保留秒
+   private static final DateTimeFormatter f1 = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static Record transportOneRecord( List<Object> recordFields
             , RecordSender recordSender, TaskPluginCollector taskPluginCollector, boolean isReadAllColumns) {
         Record record = recordSender.createRecord();
@@ -132,59 +147,171 @@ public class S3ParquetHadoopUtils {
         String accessId = readerSliceConfig.getString(S3Key.ACCESS_ID);
         String accessKey = readerSliceConfig.getString(S3Key.ACCESS_KEY);
         String endpoint = readerSliceConfig.getString(S3Key.ENDPOINT);
+        String fileformat = readerSliceConfig.getString(S3Key.FILE_FORMAT);
         Configuration conf = new Configuration();
         conf.set("fs.s3a.access.key",  accessId);
         conf.set("fs.s3a.secret.key",  accessKey);
         // 如果使用 MinIO、Ceph 等 S3 兼容服务，则加 endpoint
         conf.set("fs.s3a.endpoint", endpoint);
+        conf.set("fs.s3a.experimental.fadvise", "sequential");
+        conf.set("fs.s3a.readahead.range", "16M");
         Path path = new Path("s3a://"+bucket+"/"+object);
-        String schemaString = getParquetSchema(path.toString(), conf);
-        LOG.info("getParquetSchema {} from object {}",schemaString,object);
+        String schemaString = null;
         MessageType parquetSchema = null;
         List<org.apache.parquet.schema.Type> parquetTypes = null;
         Map<String, ParquetMeta> parquetMetaMap = null;
+        ParquetFileReader filereader =null;
         int fieldCount = 0;
-        try {
-            parquetSchema = MessageTypeParser.parseMessageType(schemaString);
-            fieldCount = parquetSchema.getFieldCount();
-            parquetTypes = parquetSchema.getFields();
-            parquetMetaMap = ParquetMessageHelper.parseParquetTypes(parquetTypes);
-        } catch (Exception e) {
-            String message = String.format("Error parsing to MessageType via Schema string [%s]", schemaString);
-            LOG.error(message);
-            throw DataXException.asDataXException(HdfsReaderErrorCode.PARSE_MESSAGE_TYPE_FROM_SCHEMA_ERROR, e);
+        if(fileformat.equalsIgnoreCase("parquet")){
+            try {
+                //schemaString=getParquetSchema(path.toString(), conf);
+                LOG.info("getParquetSchema {} from object {}",schemaString,object);
+                filereader = ParquetFileReader.open(HadoopInputFile.fromPath(path, conf));
+                parquetSchema = filereader.getFileMetaData().getSchema();
+                fieldCount = parquetSchema.getFieldCount();
+                parquetTypes = parquetSchema.getFields();
+                parquetMetaMap = ParquetMessageHelper.parseParquetTypes(parquetTypes);
+            } catch (Exception e) {
+                String message = String.format("Error parsing to MessageType via Schema string [%s]", schemaString);
+                LOG.error(message);
+                throw DataXException.asDataXException(HdfsReaderErrorCode.PARSE_MESSAGE_TYPE_FROM_SCHEMA_ERROR, e);
+            }
+            try {
+                PageReadStore pages;
+                int row=0;
+                while ((pages = filereader.readNextRowGroup()) != null) {
+                    long rowCount = pages.getRowCount();
+                    MessageColumnIO columnIO = new ColumnIOFactory().getColumnIO(parquetSchema);
+                    RecordReader<Group> recordReader = columnIO.getRecordReader(pages, new GroupRecordConverter(parquetSchema));
+
+                    for (int i = 0; i < rowCount; i++) {
+                        Group record = recordReader.read();
+                        // 处理 group
+                        List<Object> formattedRecord = new ArrayList<Object>(fieldCount);
+                        for (int j = 0; j < fieldCount; j++) {
+                            Object data=null;
+                            try {
+                                data = readFields(record, parquetTypes.get(j), j, parquetMetaMap, false);
+                            }catch (RuntimeException e){
+                                LOG.debug("error: {}",e.getMessage());
+                            }
+                            formattedRecord.add(data);
+                        }
+                        LOG.debug("read row record: {}",formattedRecord);
+                        transportOneRecord(formattedRecord, recordSende, taskPluginCollector, true);
+                        row++;
+                    }
+                    LOG.debug("read row count: {}",row);
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }else if (fileformat.equalsIgnoreCase("orc")){
+// 2. 打开 ORC 文件
+            OrcFile.ReaderOptions opts = OrcFile.readerOptions(conf);
+            try (org.apache.orc.Reader reader = OrcFile.createReader(path, opts)) {
+                // 只读需要的列（列裁剪）
+                TypeDescription schema = reader.getSchema();
+                // 3. 顺序读取 stripe
+                org.apache.orc.RecordReader rows = reader.rows(reader.options()
+                        .range(0, Long.MAX_VALUE));   // 顺序范围
+                // 2. 根据实际列数创建 batch
+                VectorizedRowBatch batch = reader.getSchema().createRowBatch(1024);
+                fieldCount = reader.getSchema().getMaximumId();
+                while (rows.nextBatch(batch)) {
+                    for (int r = 0; r < batch.size; r++) {
+                        List<Object> record = new ArrayList<>(fieldCount);
+//                        for (int c = 0; c < fieldCount; c++) {
+//                            ColumnVector cv = batch.cols[c];
+//                            if (cv.isNull[r]) {
+//                                record.add(null);
+//                                continue;
+//                            }
+//                            // 根据列类型安全取值
+//                            switch (cv.type) {
+//                                case LONG:
+//                                    record.add(((LongColumnVector) cv).vector[r]);
+//                                    break;
+//                                case DOUBLE:
+//                                    record.add(((DoubleColumnVector) cv).vector[r]);
+//                                    break;
+//                                case BYTES:
+//                                    BytesColumnVector bcv = (BytesColumnVector) cv;
+//                                    record.add(new String(bcv.vector[r], bcv.start[r], bcv.length[r], StandardCharsets.UTF_8));
+//                                    break;
+//                                case DECIMAL:
+//                                    // ORC 里 DECIMAL 存储为 HiveDecimalWritable
+//                                    record.add(((DecimalColumnVector) cv).vector[r].getHiveDecimal().bigDecimalValue().toString());
+//                                    break;
+//                                case TIMESTAMP:
+//                                    record.add(((TimestampColumnVector) cv).time[r]);
+//                                    break;
+//                                default:
+//                                    record.add(null); // 兜底
+//                            }
+//                        }
+                        for (int c = 0; c < schema.getChildren().size(); c++) {
+                            Object o = convertCell(schema.getChildren().get(c), batch.cols[c], r);
+                            record.add(o);
+                        }
+                        transportOneRecord(record, recordSende, taskPluginCollector,true);
+                    }
+                }
+                rows.close();
+            }catch (Exception e){
+                throw new RuntimeException(e);
+            }
+
         }
 
-        try (ParquetReader<Group> reader =
-                     ParquetReader.builder(new GroupReadSupport(), path)
-                             .withConf(conf)
-                             .build()) {
-            Group record;
-            int row=0;
-            while ((record = reader.read()) != null) {
-                List<Object> formattedRecord = new ArrayList<Object>(fieldCount);
-                for (int j = 0; j < fieldCount; j++) {
-                    Object data=null;
-                    try {
-                        data = readFields(record, parquetTypes.get(j), j, parquetMetaMap, false);
-                    }catch (RuntimeException e){
-                        LOG.debug("error: {}",e.getMessage());
-                    }
-                    formattedRecord.add(data);
-                }
-                LOG.debug("read row record: {}",formattedRecord);
-                transportOneRecord(formattedRecord, recordSende, taskPluginCollector, true);
-               row++;
-            }
-            LOG.debug("read row count: {}",row);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+    }
+
+    /** 把 ORC 单元格转成 Java 对象（核心函数） */
+    private static Object convertCell(TypeDescription type, ColumnVector cv, int row) {
+        if (cv.isNull[row]) {               // NULL 值
+            return null;
+        }
+        switch (type.getCategory()) {
+            case BOOLEAN:
+                return ((LongColumnVector) cv).vector[row] != 0;
+            case BYTE:
+            case SHORT:
+            case INT:
+            case LONG:
+                return ((LongColumnVector) cv).vector[row];
+            case FLOAT:
+            case DOUBLE:
+                return ((DoubleColumnVector) cv).vector[row];
+            case DECIMAL:
+                return ((DecimalColumnVector) cv).vector[row].getHiveDecimal().bigDecimalValue().toString();   // BigDecimal
+            case STRING:
+            case CHAR:
+            case VARCHAR:
+                return ((BytesColumnVector) cv).toString(row);                     // String
+            case DATE:
+                int epochDay = (int) ((LongColumnVector) cv).vector[row];
+                return LocalDate.ofEpochDay(epochDay);                             // LocalDate
+            case TIMESTAMP:
+                TimestampColumnVector tsv = (TimestampColumnVector) cv;
+                long millis = tsv.time[row];
+                int  nanos  = tsv.nanos[row];
+                LocalDateTime localDateTime = LocalDateTime.ofEpochSecond(
+                        millis / 1000, nanos, ZoneOffset.ofHours(+8));
+               return localDateTime.format(f1);  // LocalDateTime
+            case BINARY:
+                BytesColumnVector bcv = (BytesColumnVector) cv;
+                return new String(bcv.vector[row], bcv.start[row], bcv.length[row], StandardCharsets.UTF_8);// byte[]
+            case STRUCT:
+            case LIST:
+            case MAP:
+            case UNION:
+            default:
+                throw new UnsupportedOperationException("Unsupported type: " + type);
         }
     }
 
 
-
-    private static String getParquetSchema(String sourceParquetFilePath, org.apache.hadoop.conf.Configuration hadoopConf) {
+        private static String getParquetSchema(String sourceParquetFilePath, org.apache.hadoop.conf.Configuration hadoopConf) {
         GroupReadSupport readSupport = new GroupReadSupport();
         ParquetReader.Builder parquetReaderBuilder = ParquetReader.builder(readSupport, new Path(sourceParquetFilePath));
         ParquetReader<Group> reader = null;
